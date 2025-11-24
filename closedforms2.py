@@ -223,6 +223,31 @@ def get_bases_and_coefficients2(formula):
         bases_summed[base] = Add(*poly_list)
     return bases_summed.items()
 
+def convert_coordinates(text):
+    """
+    Finds patterns like "(/ 400 500)" and converts them to "(/ 400.0 500.0)".
+    """
+    # Regex Pattern Breakdown:
+    # \(      -> Matches literal "("
+    # /       -> Matches literal "/" (no escape needed in Python regex)
+    # \s+     -> Matches one or more spaces
+    # (\d+)   -> Group 1: Matches the first integer
+    # \s+     -> Matches one or more spaces
+    # (\d+)   -> Group 2: Matches the second integer
+    # \)      -> Matches literal ")"
+    pattern = r'\(\/\s+(\d+)\s+(\d+)\)'
+
+    # We use a replacement function to construct the new string
+    def replacer(match):
+        # match.group(1) is the first number (e.g., "400")
+        # match.group(2) is the second number (e.g., "500")
+        return f"(/ {match.group(1)}.0 {match.group(2)}.0)"
+
+    # re.sub finds all non-overlapping occurrences of the pattern and replaces them
+    new_text = re.sub(pattern, replacer, text)
+    
+    return new_text
+
 program = Parser().parse_file(sys.argv[1])
 program = normalize_program(program)
 rec_builder = RecBuilder(program)
@@ -253,6 +278,7 @@ for var in vars:
                 base = "1.0"
             #print(f"\tBase {j}: {base}, Coeff: {coeff}")
             smt_base = to_smtlib(sympy_to_pysmt2(sympy.factor(sympy.radsimp(sympify(base)))), daggify=False)
+            smt_base = convert_coordinates(smt_base)
             smt_coeff = to_smtlib(sympy_to_pysmt2(sympy.factor(sympy.radsimp(sympify(coeff)))), daggify=False)
             #print(f"c{i}r{j}: {smt_base}\nc{i}a{j}: {smt_coeff}")
             piece["bases"].append(smt_base)
