@@ -34,11 +34,11 @@ def sympy_to_pysmt2(sympy_expr, symbol_cache=None):
 
     # Base Case: SymPy Numbers
     elif isinstance(sympy_expr, sympy.Integer):
-        return smt.Real(float(sympy_expr))
+        return smt.Real((int(sympy_expr), 1))
     elif isinstance(sympy_expr, sympy.Float):
         return smt.Real(float(sympy_expr))
     elif isinstance(sympy_expr, sympy.Rational):
-        return smt.Real(float(sympy_expr))
+        return smt.Real((int(sympy_expr.p), int(sympy_expr.q)))
 
     # Recursive Case: Addition
     elif isinstance(sympy_expr, sympy.Add):
