@@ -185,10 +185,13 @@ def separate_pow_and_nonpow(term):
     return pow_factors, nonpow_factors
 
 def find_bases_from_formula(formula):
+    #print(formula)
     bases = defaultdict(list)
     terms = get_summands(formula)
-    
+    n = symbols('n')
     for term in terms:
+        term = sympy.powsimp(term, combine="base", force=True)
+        #print("Term: ", term)
         base = 1
         poly = 1
         pow_factors, nonpow_factors = separate_pow_and_nonpow(term)
@@ -279,6 +282,7 @@ for var in vars:
             #print(f"\tBase {j}: {base}, Coeff: {coeff}")
             smt_base = to_smtlib(sympy_to_pysmt2(sympy.factor(sympy.radsimp(sympify(base)))), daggify=False)
             smt_base = convert_coordinates(smt_base)
+            #print(smt_base)
             smt_coeff = to_smtlib(sympy_to_pysmt2(sympy.factor(sympy.radsimp(sympify(coeff)))), daggify=False)
             #print(f"c{i}r{j}: {smt_base}\nc{i}a{j}: {smt_coeff}")
             piece["bases"].append(smt_base)
