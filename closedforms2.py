@@ -226,6 +226,28 @@ def get_bases_and_coefficients2(formula):
         bases_summed[base] = Add(*poly_list)
     return bases_summed.items()
 
+def convert_coordinates2(text):
+    """
+    Scans a string and appends ".0" to any whole number (integer) that is 
+    not already part of a float (i.e., not immediately preceded or followed by a dot).
+    """
+    # Regex Pattern Breakdown:
+    # (?<!\.) : Negative Lookbehind. Ensures the number is NOT preceded by a dot
+    #           (prevents matching the "45" in "123.45").
+    # \b      : Word Boundary. Ensures we are matching a distinct number.
+    # (\d+)   : Group 1. Matches one or more digits.
+    # \b      : Word Boundary. Marks the end of the number digits.
+    # (?!\.)  : Negative Lookahead. Ensures the number is NOT followed by a dot
+    #           (prevents matching the "123" in "123.45").
+    pattern = r'(?<!\.)\b(\d+)\b(?!\.)'
+
+    # The Replacement:
+    # \g<1> represents the digits matched in Group 1.
+    # .0    is the string we want to insert.
+    new_text = re.sub(pattern, r'\g<1>.0', text)
+    
+    return new_text
+
 def convert_coordinates(text):
     """
     Finds patterns like "(/ 400 500)" and converts them to "(/ 400.0 500.0)".
@@ -281,9 +303,10 @@ for var in vars:
                 base = "1.0"
             #print(f"\tBase {j}: {base}, Coeff: {coeff}")
             smt_base = to_smtlib(sympy_to_pysmt2(sympy.factor(sympy.radsimp(sympify(base)))), daggify=False)
-            smt_base = convert_coordinates(smt_base)
+            smt_base = convert_coordinates2(smt_base)
             #print(smt_base)
             smt_coeff = to_smtlib(sympy_to_pysmt2(sympy.factor(sympy.radsimp(sympify(coeff)))), daggify=False)
+            smt_coeff = convert_coordinates2(smt_coeff)
             #print(f"c{i}r{j}: {smt_base}\nc{i}a{j}: {smt_coeff}")
             piece["bases"].append(smt_base)
             piece["coeffs"].append(smt_coeff)
