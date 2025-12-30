@@ -290,7 +290,14 @@ for var in vars:
     n_sym = symbols('n')
     #closed_form = Piecewise((0, n_sym <= 0),(689**(1/2)*7**n_sym/10**n_sym, True))
     #print(closed_form)
-    for i, (formula, _) in enumerate(closed_form.args):
+
+    if isinstance(closed_form, Piecewise):
+        pieces = closed_form.args
+    else:
+        # Treat as a single piece with condition True
+        pieces = [(closed_form, True)]
+
+    for i, (formula, _) in enumerate(pieces):
         # i represents the ith closed form for this variable.
         piece = {
             "bases" : [],
