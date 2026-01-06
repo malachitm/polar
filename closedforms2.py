@@ -11,10 +11,38 @@ from sympy import symbols, Piecewise, sympify, S, Wild, collect, simplify, sqrt,
 import re
 import sys
 from collections import defaultdict
+from sympy.printing import sstr
 
 from sympy import sqrt as sympy_sqrt
 import pysmt.shortcuts as smt
 import json
+
+from sympy import Mul, Pow, Symbol, Integer
+
+def unroll_powers(expr):
+    """
+    Recursively converts integer powers into multiplication.
+    Example: x**2 -> x*x, (y+1)**3 -> (y+1)*(y+1)*(y+1)
+    """
+    print("Before unrolling: ", expr)
+    if expr.is_Atom:
+        return expr
+
+    # Handle Power terms (base**exp)
+    if expr.is_Pow:
+        base, exp = expr.as_base_exp()
+        # Only unroll positive integers (e.g., 2, 3, 4...)
+        if exp.is_Integer and exp > 0:
+            # Recursively unroll the base first (in case it has powers inside)
+            unrolled_base = unroll_powers(base)
+            # Create a Multiplication of the base repeated 'exp' times
+            return Mul(*[unrolled_base] * int(exp))
+    
+    # Recursively apply to all arguments of other operators (Add, Mul, etc.)
+    new_expr = expr.func(*[unroll_powers(arg) for arg in expr.args])
+    print("After unrolling: ", new_expr)
+    return new_expr
+
 def sympy_to_pysmt2(sympy_expr, symbol_cache=None):
     """
     Converts a SymPy expression containing only real numbers, symbols,
@@ -132,8 +160,31 @@ def sympy_to_pysmt(sympy_expr, symbol_cache=None):
         base = sympy_to_pysmt(sympy_expr.args[0], symbol_cache)
         exponent = sympy_expr.args[1]
         if isinstance(exponent, sympy.Integer):
-            # Convert integer exponent to PySMT
-            return smt.Pow(base, smt.Real(float(exponent)))
+            exp_val = int(exponent)
+            
+            # Case 1: x^0 = 1
+            if exp_val == 0:
+                return smt.Real(1) if base.get_type().is_real_type() else smt.Int(1)
+            
+            # Case 2: x^1 = x
+            elif exp_val == 1:
+                return base
+                
+            # Case 3: x^n where n > 1 (Unroll to multiplication)
+            elif exp_val > 1:
+                # Create a list of 'base' repeated 'exp_val' times
+                unrolled_factors = [base] * exp_val
+                return smt.Times(*unrolled_factors)
+                
+            # Case 4: x^-n (Negative powers become division)
+            else:
+                # Handle x^-2 as 1 / (x * x)
+                positive_exp = -exp_val
+                unrolled_factors = [base] * positive_exp
+                denominator = smt.Times(*unrolled_factors)
+                
+                # Use Real(1) for division to ensure float division if applicable
+                return smt.Div(smt.Real(1), denominator)
         elif isinstance(exponent, sympy.Rational):
             # Convert rational exponent to PySMT
             new_exp = sympy_to_pysmt(exponent, symbol_cache)
@@ -197,17 +248,26 @@ def find_bases_from_formula(formula):
         pow_factors, nonpow_factors = separate_pow_and_nonpow(term)
         for pow_term in pow_factors:
             b, exp = pow_term.as_base_exp()
-            #print("Base:",b, "\t Exp:", exp)
+            
+            # Check if exponent is exactly n or -n
             if str(exp) == "n":
                 base *= b
             elif str(exp) == "-n":
                 base *= 1/b
+            
+            # Check if exponent is constant (e.g., n^2, 2^3)
             elif len(exp.free_symbols) == 0:
-                #print("This exponent has no free_symbols:", str(exp)) 
-                poly *= b
+                poly *= pow_term  # FIXED
+            
+            # Fallback: If exponent involves n but isn't just "n" (e.g. n+1),
+            # treating it as part of the polynomial coeff is safer than dropping it,
+            # though ideally you'd normalize 2^(n+1) -> 2 * 2^n before this loop.
+            else:
+                 poly *= pow_term
         base = sympy.simplify(base)
         for nonpow_factor in nonpow_factors:
             poly *= nonpow_factor
+        
         #print("Base: ", base)
         #print("Polynomial: ", poly)
         bases[base].append(poly)
@@ -315,6 +375,7 @@ for var in vars:
             smt_coeff = to_smtlib(sympy_to_pysmt2(sympy.factor(sympy.radsimp(sympify(coeff)))), daggify=False)
             smt_coeff = convert_coordinates2(smt_coeff)
             #print(f"c{i}r{j}: {smt_base}\nc{i}a{j}: {smt_coeff}")
+            
             piece["bases"].append(smt_base)
             piece["coeffs"].append(smt_coeff)
             
@@ -326,5 +387,5 @@ for var in vars:
 json_string = json.dumps(var_dict)
 with open('data.json', 'w', encoding='utf-8') as f:
     json.dump(var_dict, f, ensure_ascii=False, indent=4)
-print(json_string)
+print(str(json_string).replace("pow", "^"))
 #print(f"There were only {len(roots)} roots in all of the closed forms!")
