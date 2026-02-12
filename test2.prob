@@ -1,0 +1,14 @@
+x1 = 0.5
+x2 = 0.1
+x3 = 0.2
+x4 = 1.0
+y = 2.0
+delta2 = delta2_init
+
+while(true):
+    pre_xc1 = x1
+    pre_xc2 = x2
+    pre_xc3 = x3
+    pre_xc4 = x4
+
+    x1 = 

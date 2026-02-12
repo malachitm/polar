@@ -1,0 +1,20 @@
+x1 = 0.5
+x2 = 0.1
+x3 = 0.2
+x4 = 1.0
+y = 2.0
+delta2 = delta2_init
+
+while(true):
+    pre_xc1 = x1
+    pre_xc2 = x2
+    pre_xc3 = x3
+    pre_xc4 = x4
+
+    x1 = 1.17757 * pre_xc1 + 0.15468 * pre_xc2 + 0.3614 * pre_xc3 + 0.07437000000000001 * pre_xc4 + 0.61714 * (-0.15503 * delta2 * pre_xc1 + 0.03198 * delta2 * pre_xc2 + -0.09787999999999999 * delta2 * pre_xc3 + -0.00532 * delta2 * pre_xc4) + -0.78684 * (0.65434 * delta2 * pre_xc1 + -0.14282 * delta2 * pre_xc2 + 0.30492 * delta2 * pre_xc3 + 0.03626 * delta2 * pre_xc4) + 0.20519 * (0.6169 * delta2 * pre_xc1 + -0.12217 * delta2 * pre_xc2 + 0.34429 * delta2 * pre_xc3 + 0.03196 * delta2 * pre_xc4 + 1.0053 * delta2 * y) + 0.15518 * (2.29189 * delta2 * pre_xc1 + -0.51695 * delta2 * pre_xc2 + 1.15661 * delta2 * pre_xc3 + 0.10179 * delta2 * pre_xc4) + 0.03225 * (0.24126 * delta2 * pre_xc1 + -0.04778 * delta2 * pre_xc2 + 0.13465 * delta2 * pre_xc3 + 0.0125 * delta2 * pre_xc4 + -2.57059 * delta2 * y) + -0.34712 * y
+    x2 = -3.70972 * pre_xc1 + 1.5429 * pre_xc2 + -2.65686 * pre_xc3 + -0.19578 * pre_xc4 + 0.11973 * (-0.15503 * delta2 * pre_xc1 + 0.03198 * delta2 * pre_xc2 + -0.09787999999999999 * delta2 * pre_xc3 + -0.00532 * delta2 * pre_xc4) + -0.15266 * (0.65434 * delta2 * pre_xc1 + -0.14282 * delta2 * pre_xc2 + 0.30492 * delta2 * pre_xc3 + 0.03626 * delta2 * pre_xc4) + -0.82326 * (0.6169 * delta2 * pre_xc1 + -0.12217 * delta2 * pre_xc2 + 0.34429 * delta2 * pre_xc3 + 0.03196 * delta2 * pre_xc4 + 1.0053 * delta2 * y) + 0.03011 * (2.29189 * delta2 * pre_xc1 + -0.51695 * delta2 * pre_xc2 + 1.15661 * delta2 * pre_xc3 + 0.10179 * delta2 * pre_xc4) + -0.62547 * (0.24126 * delta2 * pre_xc1 + -0.04778 * delta2 * pre_xc2 + 0.13465 * delta2 * pre_xc3 + 0.0125 * delta2 * pre_xc4 + -2.57059 * delta2 * y) + 4.32037 * y
+    x3 = -2.28481 * pre_xc1 + 0.18366 * pre_xc2 + -1.01544 * pre_xc3 + -0.17827 * pre_xc4 + 0.66816 * (-0.15503 * delta2 * pre_xc1 + 0.03198 * delta2 * pre_xc2 + -0.09787999999999999 * delta2 * pre_xc3 + -0.00532 * delta2 * pre_xc4) + 0.46416 * (0.65434 * delta2 * pre_xc1 + -0.14282 * delta2 * pre_xc2 + 0.30492 * delta2 * pre_xc3 + 0.03626 * delta2 * pre_xc4) + -0.09265 * (0.6169 * delta2 * pre_xc1 + -0.12217 * delta2 * pre_xc2 + 0.34429 * delta2 * pre_xc3 + 0.03196 * delta2 * pre_xc4 + 1.0053 * delta2 * y) + -0.09154 * (2.29189 * delta2 * pre_xc1 + -0.51695 * delta2 * pre_xc2 + 1.15661 * delta2 * pre_xc3 + 0.10179 * delta2 * pre_xc4) + -0.07739 * (0.24126 * delta2 * pre_xc1 + -0.04778 * delta2 * pre_xc2 + 0.13465 * delta2 * pre_xc3 + 0.0125 * delta2 * pre_xc4 + -2.57059 * delta2 * y) + 2.82567 * y
+    x4 = 0.82117 * pre_xc1 + -0.37183 * pre_xc2 + 0.04747 * pre_xc3 + 0.73553 * pre_xc4 + 0.46416 * (-0.15503 * delta2 * pre_xc1 + 0.03198 * delta2 * pre_xc2 + -0.09787999999999999 * delta2 * pre_xc3 + -0.00532 * delta2 * pre_xc4) + 0.44041 * (0.65434 * delta2 * pre_xc1 + -0.14282 * delta2 * pre_xc2 + 0.30492 * delta2 * pre_xc3 + 0.03626 * delta2 * pre_xc4) + 0.05392 * (0.6169 * delta2 * pre_xc1 + -0.12217 * delta2 * pre_xc2 + 0.34429 * delta2 * pre_xc3 + 0.03196 * delta2 * pre_xc4 + 1.0053 * delta2 * y) + 0.11672 * (2.29189 * delta2 * pre_xc1 + -0.51695 * delta2 * pre_xc2 + 1.15661 * delta2 * pre_xc3 + 0.10179 * delta2 * pre_xc4) + 0.26285 * (0.24126 * delta2 * pre_xc1 + -0.04778 * delta2 * pre_xc2 + 0.13465 * delta2 * pre_xc3 + 0.0125 * delta2 * pre_xc4 + -2.57059 * delta2 * y) + -0.74581 * y
+end
+
+    

@@ -1,0 +1,6 @@
+x = x_init
+y = y_init
+while(true):
+    x = x + x_cond
+    y = y + 1
+end
