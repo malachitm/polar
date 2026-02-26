@@ -39,8 +39,8 @@ def get_all_roots(poly: Poly, numeric=False, numeric_croots=False, eps=1e-10):
     try:
         poly_roots = poly.all_roots(multiple=False)
     except Exception as e:
-        if poly.degree() >= 5:
-            raise e
+        #if poly.degree() >= 5:
+        #    raise e
         poly_roots = roots(poly)
         poly_roots = list(poly_roots.items())
 

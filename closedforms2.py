@@ -70,12 +70,12 @@ def sympy_to_pysmt2(sympy_expr, symbol_cache=None):
 
     # Recursive Case: Addition
     elif isinstance(sympy_expr, sympy.Add):
-        pysmt_args = [sympy_to_pysmt(arg, symbol_cache) for arg in sympy_expr.args]
+        pysmt_args = [sympy_to_pysmt2(arg, symbol_cache) for arg in sympy_expr.args]
         return smt.Plus(*pysmt_args)
 
     # Recursive Case: Multiplication
     elif isinstance(sympy_expr, sympy.Mul):
-        pysmt_args = [sympy_to_pysmt(arg, symbol_cache) for arg in sympy_expr.args]
+        pysmt_args = [sympy_to_pysmt2(arg, symbol_cache) for arg in sympy_expr.args]
         return smt.Times(*pysmt_args)
     
     # Recursive Case: Power (including square roots)
@@ -85,19 +85,48 @@ def sympy_to_pysmt2(sympy_expr, symbol_cache=None):
         
         # Special case: square root (exponent = 1/2)
         if exponent == sympy.Rational(1, 2):
-            base_pysmt = sympy_to_pysmt(base, symbol_cache)
+            base_pysmt = sympy_to_pysmt2(base, symbol_cache)
             # Check if PySMT has a sqrt function
             # If not, use Pow with exponent 0.5
-            try:
-                return smt.Sqrt(base_pysmt)  # Try using Sqrt if available
-            except AttributeError:
-                return smt.Pow(base_pysmt, smt.Real(0.5))
+            name = "sqrt" + str(base_pysmt)
+            if(name[-2:] == ".0"):
+                name = name[0:-2]
+            if sympy_expr in symbol_cache:
+                return symbol_cache[sympy_expr]
+            else:
+                pysmt_symbol = smt.Symbol(name, REAL)
+                symbol_cache[sympy_expr] = pysmt_symbol
+                return pysmt_symbol
         
         # General power case
-        base_pysmt = sympy_to_pysmt(base, symbol_cache)
+        base_pysmt = sympy_to_pysmt2(base, symbol_cache)
         
         if isinstance(exponent, sympy.Integer):
-            return smt.Pow(base_pysmt, smt.Real(float(exponent)))
+            exp_val = int(exponent)
+            
+            # Case 1: x^0 = 1
+            if exp_val == 0:
+                return smt.Real(1) if base_pysmt.get_type().is_real_type() else smt.Int(1)
+            
+            # Case 2: x^1 = x
+            elif exp_val == 1:
+                return base_pysmt
+                
+            # Case 3: x^n where n > 1 (Unroll to multiplication)
+            elif exp_val > 1:
+                # Create a list of 'base' repeated 'exp_val' times
+                unrolled_factors = [base_pysmt] * exp_val
+                return smt.Times(*unrolled_factors)
+                
+            # Case 4: x^-n (Negative powers become division)
+            else:
+                # Handle x^-2 as 1 / (x * x)
+                positive_exp = -exp_val
+                unrolled_factors = [base_pysmt] * positive_exp
+                denominator = smt.Times(*unrolled_factors)
+                
+                # Use Real(1) for division to ensure float division if applicable
+                return smt.Div(smt.Real(1), denominator)
         elif isinstance(exponent, sympy.Rational):
             exp_pysmt = smt.Real(float(exponent))
             return smt.Pow(base_pysmt, exp_pysmt)
@@ -290,16 +319,20 @@ def convert_coordinates2(text):
     """
     Scans a string and appends ".0" to any whole number (integer) that is 
     not already part of a float (i.e., not immediately preceded or followed by a dot).
+    Also skips numbers that are part of special root variable names like sqrt17.
     """
     # Regex Pattern Breakdown:
     # (?<!\.) : Negative Lookbehind. Ensures the number is NOT preceded by a dot
     #           (prevents matching the "45" in "123.45").
+    # (?<!sqrt) : Negative Lookbehind. Ensures the number is NOT preceded by "sqrt"
+    #           (prevents matching numbers in "sqrt17", "sqrt42", etc.).
+    #           (prevents matching numbers in "cbrt8", etc.).
     # \b      : Word Boundary. Ensures we are matching a distinct number.
     # (\d+)   : Group 1. Matches one or more digits.
     # \b      : Word Boundary. Marks the end of the number digits.
     # (?!\.)  : Negative Lookahead. Ensures the number is NOT followed by a dot
     #           (prevents matching the "123" in "123.45").
-    pattern = r'(?<!\.)\b(\d+)\b(?!\.)'
+    pattern = r'(?<![\.t])\b(\d+)\b(?!\.)'
 
     # The Replacement:
     # \g<1> represents the digits matched in Group 1.
