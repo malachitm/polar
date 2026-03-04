@@ -199,6 +199,40 @@ def eval_re(n, expression):
     return re(result.expand())
 
 
+def resolve_real_croot(root, eps=1e-10):
+    """
+    Given a ComplexRootOf, determines if the root is real and extracts its
+    polynomial and isolating interval.
+
+    Returns a tuple (status, data) where:
+      - ("not_croot", None)    : the input is not a ComplexRootOf instance
+      - ("complex", poly_expr) : the root is complex; poly_expr is the minimal polynomial
+      - ("real", (poly_expr, low, high)) : the root is real; poly_expr is the minimal
+        polynomial and [low, high] is a rational isolating interval refined to width < eps
+    """
+    if not isinstance(root, ComplexRootOf):
+        return ("not_croot", None)
+
+    # Extract the minimal polynomial
+    poly_expr = root.poly.as_expr()
+
+    if not root.is_real:
+        return ("complex", poly_expr)
+
+    # Get the isolating interval (a RealInterval for real roots)
+    interval = root._get_interval()
+
+    # Refine the interval by bisection until its width is less than eps
+    tol = Rational(eps).limit_denominator(10**15)
+    while (interval.b - interval.a) > tol:
+        interval = interval.refine()
+
+    # Store the refined interval back on the root object (caches refinement)
+    root._set_interval(interval)
+
+    return ("real", (poly_expr, Rational(interval.a), Rational(interval.b)))
+
+
 def numerify_croots(expression):
     """
     Replaces every croot in an expression by a floating-point representation
