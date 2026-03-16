@@ -1,4 +1,5 @@
 sympy==1.11.*
+pysmt==0.9.*
 symengine==0.11.*
 lark-parser==0.11
 singledispatchmethod==1.0
