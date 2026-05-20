@@ -12,12 +12,97 @@ import re
 import sys
 from collections import defaultdict
 from sympy.printing import sstr
+from utils import resolve_real_croot, poly_to_int_coeffs
 
 from sympy import sqrt as sympy_sqrt
 import pysmt.shortcuts as smt
 import json
 
 from sympy import Mul, Pow, Symbol, Integer
+
+ALGEBRAIC_INTERVAL_EPS = 1e-10
+
+
+class RootRegistry:
+    def __init__(self):
+        self._entries = {}
+        self._symbols = {}
+        self._ordered = []
+
+    def register(self, expr):
+        if expr in self._entries:
+            return self._entries[expr]["name"]
+
+        resolved = resolve_real_algebraic_expr(expr)
+        if resolved is None:
+            return None
+
+        poly_expr, low, high = resolved
+        entry = {
+            "name": f"_alg_{len(self._ordered)}",
+            "poly_coeffs": poly_to_int_coeffs(poly_expr),
+            "low": str(low),
+            "high": str(high),
+        }
+        self._entries[expr] = entry
+        self._symbols[expr] = sympy.Symbol(entry["name"], real=True)
+        self._ordered.append(entry)
+        return entry["name"]
+
+    def substitution_map(self):
+        return dict(self._symbols)
+
+    def to_json(self):
+        return list(self._ordered)
+
+
+def resolve_real_algebraic_expr(expr, eps=ALGEBRAIC_INTERVAL_EPS):
+    expr = sympy.simplify(sympy.sympify(expr))
+    if expr.is_rational:
+        return None
+
+    if isinstance(expr, sympy.ComplexRootOf):
+        status, data = resolve_real_croot(expr, eps=eps)
+        if status == "real":
+            return data
+        return None
+
+    if expr.free_symbols:
+        return None
+
+    if isinstance(expr, sympy.Pow) and isinstance(expr.exp, sympy.Rational) and not expr.exp.is_Integer:
+        if expr.is_real is False:
+            return None
+
+        poly_var = sympy.Symbol("_alg_x")
+        poly = sympy.Poly(sympy.minpoly(expr, poly_var), poly_var)
+        target = sympy.N(expr, 50)
+        for interval, _ in poly.intervals(eps=eps):
+            low, high = interval
+            low_q = sympy.Rational(low)
+            high_q = sympy.Rational(high)
+            if low_q <= target <= high_q:
+                return (poly.as_expr(), low_q, high_q)
+
+        raise ValueError(f"Could not isolate algebraic root for {expr}")
+
+    return None
+
+
+def extract_algebraic_roots(expr, registry):
+    expr = sympy.sympify(expr)
+    if registry.register(expr) is not None:
+        return
+
+    for arg in expr.args:
+        extract_algebraic_roots(arg, registry)
+
+
+def substitute_registered_roots(expr, registry):
+    substitutions = registry.substitution_map()
+    if not substitutions:
+        return expr
+    return sympy.sympify(expr).xreplace(substitutions)
 
 def unroll_powers(expr):
     """
@@ -82,22 +167,7 @@ def sympy_to_pysmt2(sympy_expr, symbol_cache=None):
     elif isinstance(sympy_expr, sympy.Pow):
         base = sympy_expr.args[0]
         exponent = sympy_expr.args[1]
-        
-        # Special case: square root (exponent = 1/2)
-        if exponent == sympy.Rational(1, 2):
-            base_pysmt = sympy_to_pysmt2(base, symbol_cache)
-            # Check if PySMT has a sqrt function
-            # If not, use Pow with exponent 0.5
-            name = "sqrt" + str(base_pysmt)
-            if(name[-2:] == ".0"):
-                name = name[0:-2]
-            if sympy_expr in symbol_cache:
-                return symbol_cache[sympy_expr]
-            else:
-                pysmt_symbol = smt.Symbol(name, REAL)
-                symbol_cache[sympy_expr] = pysmt_symbol
-                return pysmt_symbol
-        
+
         # General power case
         base_pysmt = sympy_to_pysmt2(base, symbol_cache)
         
@@ -375,6 +445,7 @@ if len(sys.argv) > 2:
 
 roots: set = set()
 var_dict = {}
+root_registry = RootRegistry()
 for var in vars:
     #print(f"{var}")
     var_dict[var] = []
@@ -390,6 +461,9 @@ for var in vars:
         # Treat as a single piece with condition True
         pieces = [(closed_form, True)]
 
+    for formula, _ in pieces:
+        extract_algebraic_roots(formula, root_registry)
+
     for i, (formula, _) in enumerate(pieces):
         # i represents the ith closed form for this variable.
         piece = {
@@ -402,10 +476,13 @@ for var in vars:
             if base == "constant":
                 base = "1.0"
             #print(f"\tBase {j}: {base}, Coeff: {coeff}")
-            smt_base = to_smtlib(sympy_to_pysmt2(sympy.factor(sympy.radsimp(sympify(base)))), daggify=False)
+            base_expr = substitute_registered_roots(sympy.factor(sympy.radsimp(sympify(base))), root_registry)
+            coeff_expr = substitute_registered_roots(sympy.factor(sympy.radsimp(sympify(coeff))), root_registry)
+
+            smt_base = to_smtlib(sympy_to_pysmt2(base_expr), daggify=False)
             smt_base = convert_coordinates2(smt_base)
             #print(smt_base)
-            smt_coeff = to_smtlib(sympy_to_pysmt2(sympy.factor(sympy.radsimp(sympify(coeff)))), daggify=False)
+            smt_coeff = to_smtlib(sympy_to_pysmt2(coeff_expr), daggify=False)
             smt_coeff = convert_coordinates2(smt_coeff)
             #print(f"c{i}r{j}: {smt_base}\nc{i}a{j}: {smt_coeff}")
             
@@ -417,8 +494,9 @@ for var in vars:
         
         var_dict[var].append(piece)
 
-json_string = json.dumps(var_dict)
+payload = {"aux_roots": root_registry.to_json(), **var_dict}
+json_string = json.dumps(payload)
 with open('data.json', 'w', encoding='utf-8') as f:
-    json.dump(var_dict, f, ensure_ascii=False, indent=4)
+    json.dump(payload, f, ensure_ascii=False, indent=4)
 print(str(json_string).replace("pow", "^"))
 #print(f"There were only {len(roots)} roots in all of the closed forms!")

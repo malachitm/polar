@@ -14,6 +14,8 @@ from .expressions import (
     unpack_piecewise,
     get_max_case_in_piecewise,
     are_coprime,
+    resolve_real_croot,
+    poly_to_int_coeffs,
 )
 from .conditions import get_valid_values, evaluate_cop
 from .finite_power_reduction import get_reduced_powers

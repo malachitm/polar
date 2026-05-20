@@ -233,6 +233,19 @@ def resolve_real_croot(root, eps=1e-10):
     return ("real", (poly_expr, Rational(interval.a), Rational(interval.b)))
 
 
+def poly_to_int_coeffs(poly_expr) -> List[str]:
+    """
+    Convert a polynomial expression into ascending-degree integer coefficients.
+    """
+    poly = poly_expr if isinstance(poly_expr, Poly) else Poly(poly_expr)
+    coeffs = []
+    for coeff in reversed(poly.all_coeffs()):
+        if not coeff.is_Integer:
+            raise ValueError(f"Polynomial coefficient is not integral: {coeff}")
+        coeffs.append(str(int(coeff)))
+    return coeffs
+
+
 def numerify_croots(expression):
     """
     Replaces every croot in an expression by a floating-point representation
