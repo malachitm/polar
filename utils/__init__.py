@@ -15,6 +15,10 @@ from .expressions import (
     get_max_case_in_piecewise,
     are_coprime,
     resolve_real_croot,
+    detect_angle_period,
+    phase_metadata,
+    mag_poly_from_complex_root,
+    complex_root_metadata,
     poly_to_int_coeffs,
 )
 from .conditions import get_valid_values, evaluate_cop

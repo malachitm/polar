@@ -12,7 +12,7 @@ import re
 import sys
 from collections import defaultdict
 from sympy.printing import sstr
-from utils import resolve_real_croot, poly_to_int_coeffs
+from utils import resolve_real_croot, poly_to_int_coeffs, complex_root_metadata, phase_metadata
 
 from sympy import sqrt as sympy_sqrt
 import pysmt.shortcuts as smt
@@ -54,6 +54,271 @@ class RootRegistry:
 
     def to_json(self):
         return list(self._ordered)
+
+
+def serialize_real_value(value, digits=50):
+    value = sympy.simplify(sympy.sympify(value))
+    if value.is_Rational:
+        return str(value)
+    return str(sympy.N(value, digits))
+
+
+def resolve_algebraic_value(expr, eps=ALGEBRAIC_INTERVAL_EPS):
+    """Return (int_coeffs_list, low_str, high_str) for a real algebraic irrational.
+
+    The returned polynomial is the minimal polynomial of *expr* and the interval
+    [low, high] isolates it from all other roots.  Returns None when *expr* is
+    rational (the caller should use serialize_real_value instead).
+    """
+    expr = sympy.simplify(sympy.sympify(expr))
+    if expr.is_rational:
+        return None
+    if expr.free_symbols:
+        return None
+
+    poly_var = sympy.Symbol("_x")
+    try:
+        min_poly = sympy.minpoly(expr, poly_var)
+    except Exception:
+        return None
+
+    poly_num, _ = sympy.fraction(sympy.together(min_poly))
+    poly = sympy.Poly(poly_num, poly_var)
+
+    target = sympy.N(expr, 50)
+    for interval, _ in poly.intervals(eps=eps):
+        low, high = interval
+        low_q = sympy.Rational(low)
+        high_q = sympy.Rational(high)
+        if low_q <= target <= high_q:
+            return (poly_to_int_coeffs(poly.as_expr()), str(low_q), str(high_q))
+
+    raise ValueError(f"Could not isolate algebraic polynomial for {expr}")
+
+
+def linear_n_coeff(exp, symbol_name="n"):
+    exp = sympy.sympify(exp)
+    if not exp.free_symbols:
+        return None
+
+    n_symbols = [sym for sym in exp.free_symbols if getattr(sym, "name", None) == symbol_name]
+    if len(n_symbols) != 1 or len(exp.free_symbols) != 1:
+        return None
+
+    coeff = sympy.simplify(exp / n_symbols[0])
+    return coeff if coeff.is_Rational else None
+
+
+def affine_n_parts(exp, symbol_name="n"):
+    exp = sympy.simplify(sympy.sympify(exp))
+    if not exp.free_symbols:
+        return sympy.Integer(0), exp
+
+    n_symbols = [sym for sym in exp.free_symbols if getattr(sym, "name", None) == symbol_name]
+    if len(n_symbols) != 1 or len(exp.free_symbols) != 1:
+        return None
+
+    n_sym = n_symbols[0]
+    coeff = sympy.simplify(sympy.diff(exp, n_sym))
+    if coeff.free_symbols:
+        return None
+
+    constant = sympy.simplify(exp - coeff * n_sym)
+    if constant.free_symbols:
+        return None
+
+    return coeff, constant
+
+
+def is_negative_real_constant(expr):
+    expr = sympy.simplify(sympy.sympify(expr))
+    if expr.free_symbols:
+        return False
+    if expr.is_real is False:
+        return False
+    if expr.is_negative is True:
+        return True
+    try:
+        return sympy.N(expr, 50) < 0
+    except TypeError:
+        return False
+
+
+def resolve_positive_magnitude_expr(expr, eps=ALGEBRAIC_INTERVAL_EPS):
+    expr = sympy.simplify(sympy.sympify(expr))
+    if expr.free_symbols or expr.is_real is False:
+        raise ValueError(f"Expected a concrete positive real magnitude, got {expr}")
+
+    poly_var = sympy.Symbol("_mag_x")
+    min_poly = sympy.minpoly(expr, poly_var)
+    poly_num, _ = sympy.fraction(sympy.together(min_poly))
+    poly = sympy.Poly(poly_num, poly_var)
+
+    if expr.is_rational:
+        qexpr = sympy.Rational(expr)
+        return poly.as_expr(), qexpr, qexpr
+
+    target = sympy.N(expr, 50)
+    for interval, _ in poly.intervals(eps=eps):
+        low, high = interval
+        low_q = sympy.Rational(low)
+        high_q = sympy.Rational(high)
+        if low_q <= target <= high_q:
+            return poly.as_expr(), low_q, high_q
+
+    raise ValueError(f"Could not isolate magnitude polynomial for {expr}")
+
+
+class ComplexPairRegistry:
+    def __init__(self):
+        self._entries = {}
+        self._root_to_entry = {}
+        self._negative_entries = {}
+        self._ordered = []
+
+    def _key(self, root):
+        conj_root = sympy.conjugate(root)
+        return tuple(sorted((sstr(root), sstr(conj_root))))
+
+    def _metadata_for_root(self, root):
+        if isinstance(root, sympy.ComplexRootOf):
+            return complex_root_metadata(root, eps=ALGEBRAIC_INTERVAL_EPS)
+
+        real_part = sympy.simplify(sympy.re(root))
+        imag_part = sympy.simplify(sympy.im(root))
+        if imag_part == 0:
+            raise ValueError(f"expected a non-real algebraic constant, got {root}")
+
+        magnitude = sympy.simplify(sympy.sqrt(real_part**2 + imag_part**2))
+        poly_expr, low, high = resolve_positive_magnitude_expr(magnitude)
+        phase = phase_metadata(real_part, imag_part)
+        return {
+            "mag_poly": poly_expr,
+            "mag_low": low,
+            "mag_high": high,
+            **phase,
+        }
+
+    def register(self, expr):
+        root = sympy.simplify(sympy.sympify(expr))
+        if root.free_symbols or root.is_real:
+            return None
+
+        if sympy.simplify(sympy.im(root)) == 0:
+            return None
+
+        key = self._key(root)
+        if key in self._entries:
+            return self._entries[key]
+
+        metadata = self._metadata_for_root(root)
+        index = len(self._ordered)
+        conjugate_root = sympy.conjugate(root)
+        period = int(metadata["period"]) if metadata["is_periodic"] else None
+        cos_alg = resolve_algebraic_value(metadata["cos_theta"])
+        sin_alg = resolve_algebraic_value(metadata["sin_theta"])
+        entry = {
+            "mag_name": f"_mag_{index}",
+            "ccos_name": f"_ccos_{index}",
+            "csin_name": f"_csin_{index}",
+            "mag_poly": poly_to_int_coeffs(metadata["mag_poly"]),
+            "mag_low": str(metadata["mag_low"]),
+            "mag_high": str(metadata["mag_high"]),
+            "cos_theta": serialize_real_value(metadata["cos_theta"]),
+            "sin_theta": serialize_real_value(metadata["sin_theta"]),
+            "cos_theta_poly": cos_alg[0] if cos_alg else None,
+            "cos_theta_low": cos_alg[1] if cos_alg else None,
+            "cos_theta_high": cos_alg[2] if cos_alg else None,
+            "sin_theta_poly": sin_alg[0] if sin_alg else None,
+            "sin_theta_low": sin_alg[1] if sin_alg else None,
+            "sin_theta_high": sin_alg[2] if sin_alg else None,
+            "is_periodic": bool(metadata["is_periodic"]),
+            "period": period,
+            "root": root,
+            "conjugate_root": conjugate_root,
+            "mag_symbol": sympy.Symbol(f"_mag_{index}", real=True, positive=True),
+            "ccos_symbol": sympy.Symbol(f"_ccos_{index}", real=True),
+            "csin_symbol": sympy.Symbol(f"_csin_{index}", real=True),
+        }
+        self._entries[key] = entry
+        self._root_to_entry[root] = entry
+        self._root_to_entry[conjugate_root] = entry
+        self._ordered.append(entry)
+        return entry
+
+    def get(self, root):
+        return self._root_to_entry.get(sympy.sympify(root))
+
+    def register_negative_real(self, expr):
+        root = sympy.simplify(sympy.sympify(expr))
+        if not is_negative_real_constant(root):
+            return None
+
+        key = sstr(root)
+        if key in self._negative_entries:
+            return self._negative_entries[key]
+
+        magnitude = sympy.simplify(-root)
+        poly_expr, low, high = resolve_positive_magnitude_expr(magnitude)
+        phase = phase_metadata(root, sympy.Integer(0))
+        index = len(self._ordered)
+        cos_alg = resolve_algebraic_value(phase["cos_theta"])
+        sin_alg = resolve_algebraic_value(phase["sin_theta"])
+        entry = {
+            "kind": "negative-real",
+            "mag_name": f"_mag_{index}",
+            "ccos_name": f"_ccos_{index}",
+            "csin_name": f"_csin_{index}",
+            "mag_poly": poly_to_int_coeffs(poly_expr),
+            "mag_low": str(low),
+            "mag_high": str(high),
+            "cos_theta": serialize_real_value(phase["cos_theta"]),
+            "sin_theta": serialize_real_value(phase["sin_theta"]),
+            "cos_theta_poly": cos_alg[0] if cos_alg else None,
+            "cos_theta_low": cos_alg[1] if cos_alg else None,
+            "cos_theta_high": cos_alg[2] if cos_alg else None,
+            "sin_theta_poly": sin_alg[0] if sin_alg else None,
+            "sin_theta_low": sin_alg[1] if sin_alg else None,
+            "sin_theta_high": sin_alg[2] if sin_alg else None,
+            "is_periodic": bool(phase["is_periodic"]),
+            "period": int(phase["period"]) if phase["is_periodic"] else None,
+            "root": root,
+            "mag_symbol": sympy.Symbol(f"_mag_{index}", real=True, positive=True),
+            "ccos_symbol": sympy.Symbol(f"_ccos_{index}", real=True),
+            "csin_symbol": sympy.Symbol(f"_csin_{index}", real=True),
+        }
+        self._negative_entries[key] = entry
+        self._ordered.append(entry)
+        return entry
+
+    def get_negative(self, root):
+        return self._negative_entries.get(sstr(sympy.simplify(sympy.sympify(root))))
+
+    def to_json(self):
+        result = []
+        for entry in self._ordered:
+            obj = {
+                "mag_name": entry["mag_name"],
+                "ccos_name": entry["ccos_name"],
+                "csin_name": entry["csin_name"],
+                "mag_poly": entry["mag_poly"],
+                "mag_low": entry["mag_low"],
+                "mag_high": entry["mag_high"],
+                "cos_theta": entry["cos_theta"],
+                "sin_theta": entry["sin_theta"],
+                "is_periodic": entry["is_periodic"],
+                "period": entry["period"],
+            }
+            if entry.get("cos_theta_poly") is not None:
+                obj["cos_theta_poly"] = entry["cos_theta_poly"]
+                obj["cos_theta_low"] = entry["cos_theta_low"]
+                obj["cos_theta_high"] = entry["cos_theta_high"]
+            if entry.get("sin_theta_poly") is not None:
+                obj["sin_theta_poly"] = entry["sin_theta_poly"]
+                obj["sin_theta_low"] = entry["sin_theta_low"]
+                obj["sin_theta_high"] = entry["sin_theta_high"]
+            result.append(obj)
+        return result
 
 
 def resolve_real_algebraic_expr(expr, eps=ALGEBRAIC_INTERVAL_EPS):
@@ -98,11 +363,131 @@ def extract_algebraic_roots(expr, registry):
         extract_algebraic_roots(arg, registry)
 
 
+def extract_complex_pairs(expr, registry):
+    expr = sympy.sympify(expr)
+    # Only register the base when this expression is Pow(base, k*n) — the only
+    # form where a genuine eigenvalue base appears in a closed form.  Visiting
+    # arbitrary complex sub-expressions (e.g. the imaginary unit I inside an
+    # eigenvector coefficient) would otherwise register spurious complex pairs.
+    if isinstance(expr, sympy.Pow):
+        base, exp = expr.as_base_exp()
+        if linear_n_coeff(exp, "n") is not None:
+            registry.register(base)
+            return
+
+    for arg in expr.args:
+        extract_complex_pairs(arg, registry)
+
+
 def substitute_registered_roots(expr, registry):
     substitutions = registry.substitution_map()
     if not substitutions:
         return expr
     return sympy.sympify(expr).xreplace(substitutions)
+
+
+def split_complex_root_term(term, registry, symbol_name="n"):
+    factors = term.args if isinstance(term, sympy.Mul) else (term,)
+    coeff = sympy.Integer(1)
+    root = None
+
+    for factor in factors:
+        normalized = sympy.powdenest(factor, force=True)
+        if isinstance(normalized, sympy.Pow):
+            base, exp = normalized.as_base_exp()
+            if linear_n_coeff(exp, symbol_name) == 1:
+                entry = registry.get(base)
+                if entry is not None:
+                    if root is not None:
+                        return None
+                    root = sympy.sympify(base)
+                    continue
+        coeff *= factor
+
+    if root is None:
+        return None
+    return root, sympy.simplify(coeff)
+
+
+def rewrite_complex_pairs(expr, registry, n_sym):
+    expr = sympy.expand(sympy.sympify(expr))
+    grouped_terms = {}
+    unmatched_terms = []
+
+    for term in get_summands(expr):
+        split = split_complex_root_term(term, registry, getattr(n_sym, "name", "n"))
+        if split is None:
+            unmatched_terms.append(term)
+            continue
+
+        root, coeff = split
+        entry = registry.get(root)
+        if entry is None:
+            unmatched_terms.append(term)
+            continue
+
+        group = grouped_terms.setdefault(
+            entry["mag_name"],
+            {"entry": entry, "alpha_coeff": None, "beta_coeff": None},
+        )
+        if root == entry["root"]:
+            group["alpha_coeff"] = coeff if group["alpha_coeff"] is None else sympy.simplify(group["alpha_coeff"] + coeff)
+        else:
+            group["beta_coeff"] = coeff if group["beta_coeff"] is None else sympy.simplify(group["beta_coeff"] + coeff)
+
+    rewritten_terms = list(unmatched_terms)
+    for group in grouped_terms.values():
+        entry = group["entry"]
+        alpha_coeff = group["alpha_coeff"]
+        beta_coeff = group["beta_coeff"]
+
+        if alpha_coeff is None or beta_coeff is None:
+            if alpha_coeff is not None:
+                rewritten_terms.append(alpha_coeff * entry["root"] ** n_sym)
+            if beta_coeff is not None:
+                rewritten_terms.append(beta_coeff * entry["conjugate_root"] ** n_sym)
+            continue
+
+        trig_coeff = sympy.simplify(
+            (alpha_coeff + beta_coeff) * entry["ccos_symbol"]
+            + sympy.I * (alpha_coeff - beta_coeff) * entry["csin_symbol"]
+        )
+        rewritten_terms.append(sympy.simplify((entry["mag_symbol"] ** n_sym) * trig_coeff))
+
+    return sympy.simplify(sympy.Add(*rewritten_terms))
+
+
+def rewrite_negative_real_phases(expr, registry, n_sym):
+    expr = sympy.expand(sympy.sympify(expr))
+    rewritten_terms = []
+
+    for term in get_summands(expr):
+        normalized = sympy.powsimp(term, combine="base", force=True)
+        factors = normalized.args if isinstance(normalized, sympy.Mul) else (normalized,)
+
+        negative_pow = None
+        remaining = sympy.Integer(1)
+        for factor in factors:
+            candidate = sympy.powdenest(factor, force=True)
+            if isinstance(candidate, sympy.Pow):
+                base, exp = candidate.as_base_exp()
+                if linear_n_coeff(exp, getattr(n_sym, "name", "n")) == 1 and is_negative_real_constant(base):
+                    if negative_pow is not None:
+                        negative_pow = None
+                        break
+                    negative_pow = base
+                    continue
+            remaining *= factor
+
+        if negative_pow is None:
+            rewritten_terms.append(normalized)
+            continue
+
+        entry = registry.register_negative_real(negative_pow)
+        mag_term = entry["mag_symbol"] ** n_sym
+        rewritten_terms.append(sympy.simplify(remaining * mag_term * entry["ccos_symbol"]))
+
+    return sympy.simplify(sympy.Add(*rewritten_terms))
 
 def unroll_powers(expr):
     """
@@ -197,13 +582,16 @@ def sympy_to_pysmt2(sympy_expr, symbol_cache=None):
                 
                 # Use Real(1) for division to ensure float division if applicable
                 return smt.Div(smt.Real(1), denominator)
-        elif isinstance(exponent, sympy.Rational):
-            exp_pysmt = smt.Real(float(exponent))
-            return smt.Pow(base_pysmt, exp_pysmt)
-        elif isinstance(exponent, sympy.Symbol):
-            return smt.Pow(base_pysmt, smt.Symbol(str(exponent), REAL))
         else:
-            raise NotImplementedError(f"Unsupported exponent type: {type(exponent).__name__}")
+            if exponent.has(sympy.I):
+                raise NotImplementedError("Complex exponents are not supported")
+            if exponent.free_symbols:
+                raise NotImplementedError(
+                    f"Non-constant exponent reached sympy_to_pysmt2: {sympy_expr}"
+                )
+            exp_pysmt = sympy_to_pysmt2(exponent, symbol_cache)
+            # return smt.Pow(base_pysmt, smt.Symbol(str(exp_pysmt), REAL))
+            return smt.Pow(base_pysmt, exp_pysmt)
     
     # Handle constants
     elif isinstance(sympy_expr, (sympy.core.numbers.Pi, sympy.core.numbers.EulerGamma, sympy.core.numbers.ImaginaryUnit)):
@@ -284,18 +672,16 @@ def sympy_to_pysmt(sympy_expr, symbol_cache=None):
                 
                 # Use Real(1) for division to ensure float division if applicable
                 return smt.Div(smt.Real(1), denominator)
-        elif isinstance(exponent, sympy.Rational):
-            # Convert rational exponent to PySMT
-            new_exp = sympy_to_pysmt(exponent, symbol_cache)
-            return smt.Pow(base, new_exp)
-        elif isinstance(exponent, sympy.Symbol):
-            # If exponent is a symbol, treat it as a variable
-            # This is a bit tricky, as PySMT doesn't support symbolic exponents directly
-            # We can return the base raised to the exponent symbolically
-            return smt.Pow(base, smt.Symbol(str(exponent), REAL))
         else:
-            # Unsupported exponent type
-            raise NotImplementedError(f"Unsupported exponent type: {type(exponent).__name__}")
+            if exponent.has(sympy.I):
+                raise NotImplementedError("Complex exponents are not supported")
+            if exponent.free_symbols:
+                raise NotImplementedError(
+                    f"Non-constant exponent reached sympy_to_pysmt: {sympy_expr}"
+                )
+            new_exp = sympy_to_pysmt(exponent, symbol_cache)
+            # return smt.Pow(base_pysmt, smt.Symbol(str(new_exp), REAL))
+            return smt.Pow(base, new_exp)
     
     # Handle constants like pi, E, etc. (Treat them as symbols for now)
     # Or raise error if they shouldn't be treated as symbols
@@ -322,11 +708,20 @@ def separate_pow_and_nonpow(term):
         factors = term.args
     else:
         factors = [term]
+
+    flattened_factors = []
+    for factor in factors:
+        if isinstance(factor, sympy.Pow):
+            base, exp = factor.as_base_exp()
+            if isinstance(base, sympy.Mul) and not exp.free_symbols:
+                flattened_factors.extend(sympy.Pow(arg, exp) for arg in base.args)
+                continue
+        flattened_factors.append(factor)
     
     pow_factors = []
     nonpow_factors = []
     
-    for factor in factors:
+    for factor in flattened_factors:
         if isinstance(factor, sympy.Pow):
             pow_factors.append(factor)
         else:
@@ -338,31 +733,29 @@ def find_bases_from_formula(formula):
     #print(formula)
     bases = defaultdict(list)
     terms = get_summands(formula)
-    n = symbols('n')
+
     for term in terms:
+        term = sympy.expand_power_base(term, force=True)
         term = sympy.powsimp(term, combine="base", force=True)
         #print("Term: ", term)
         base = 1
         poly = 1
         pow_factors, nonpow_factors = separate_pow_and_nonpow(term)
         for pow_term in pow_factors:
+            pow_term = sympy.powdenest(pow_term, force=True)
             b, exp = pow_term.as_base_exp()
-            
-            # Check if exponent is exactly n or -n
-            if str(exp) == "n":
-                base *= b
-            elif str(exp) == "-n":
-                base *= 1/b
-            
-            # Check if exponent is constant (e.g., n^2, 2^3)
-            elif len(exp.free_symbols) == 0:
-                poly *= pow_term  # FIXED
-            
-            # Fallback: If exponent involves n but isn't just "n" (e.g. n+1),
-            # treating it as part of the polynomial coeff is safer than dropping it,
-            # though ideally you'd normalize 2^(n+1) -> 2 * 2^n before this loop.
+            parts = affine_n_parts(exp)
+
+            # Normalize b^(q*n + c) into (b^q)^n * b^c so the base remains
+            # constant and no symbolic exponent reaches the SMT serializer.
+            if parts is not None:
+                coeff, constant = parts
+                if sympy.simplify(coeff) != 0:
+                    base *= sympy.Pow(b, coeff)
+                if sympy.simplify(constant) != 0:
+                    poly *= sympy.Pow(b, constant)
             else:
-                 poly *= pow_term
+                poly *= pow_term
         base = sympy.simplify(base)
         for nonpow_factor in nonpow_factors:
             poly *= nonpow_factor
@@ -384,6 +777,37 @@ def get_bases_and_coefficients2(formula):
     for base, poly_list in bases.items():
         bases_summed[base] = Add(*poly_list)
     return bases_summed.items()
+
+
+def normalize_serialized_base_and_coeff(base_expr, coeff_expr, symbol_name="n"):
+    base_expr = sympy.sympify(base_expr)
+    coeff_expr = sympy.sympify(coeff_expr)
+    coeff_expr = sympy.expand_power_base(coeff_expr, force=True)
+    coeff_expr = sympy.powsimp(coeff_expr, force=True)
+
+    if isinstance(coeff_expr, sympy.Mul):
+        factors = list(coeff_expr.args)
+    else:
+        factors = [coeff_expr]
+
+    normalized_factors = []
+    for factor in factors:
+        candidate = sympy.powdenest(factor, force=True)
+        if isinstance(candidate, sympy.Pow):
+            factor_base, factor_exp = candidate.as_base_exp()
+            parts = affine_n_parts(factor_exp, symbol_name)
+            if parts is not None:
+                n_coeff, constant = parts
+                if sympy.simplify(n_coeff) != 0:
+                    base_expr *= sympy.Pow(factor_base, n_coeff)
+                    if sympy.simplify(constant) != 0:
+                        normalized_factors.append(sympy.Pow(factor_base, constant))
+                    continue
+        normalized_factors.append(candidate)
+
+    base_expr = sympy.powsimp(sympy.expand_power_base(base_expr, force=True), combine="base", force=True)
+    coeff_expr = sympy.powsimp(sympy.Mul(*normalized_factors), force=True)
+    return sympy.simplify(base_expr), sympy.simplify(coeff_expr)
 
 def convert_coordinates2(text):
     """
@@ -436,67 +860,74 @@ def convert_coordinates(text):
     
     return new_text
 
-program = Parser().parse_file(sys.argv[1])
-program = normalize_program(program)
-rec_builder = RecBuilder(program)
-vars = []
-if len(sys.argv) > 2:
-    vars = sys.argv[2:]
+def build_payload(program_path, vars):
+    program = Parser().parse_file(program_path)
+    program = normalize_program(program)
+    rec_builder = RecBuilder(program)
 
-roots: set = set()
-var_dict = {}
-root_registry = RootRegistry()
-for var in vars:
-    #print(f"{var}")
-    var_dict[var] = []
-    recurr = rec_builder.get_recurrences(var)
-    closed_form = RecurrenceSolver(recurr).get(var)
-    n_sym = symbols('n')
-    #closed_form = Piecewise((0, n_sym <= 0),(689**(1/2)*7**n_sym/10**n_sym, True))
-    #print(closed_form)
+    roots: set = set()
+    var_dict = {}
+    root_registry = RootRegistry()
+    complex_registry = ComplexPairRegistry()
 
-    if isinstance(closed_form, Piecewise):
-        pieces = closed_form.args
-    else:
-        # Treat as a single piece with condition True
-        pieces = [(closed_form, True)]
+    for var in vars:
+        var_dict[var] = []
+        recurr = rec_builder.get_recurrences(var)
+        closed_form = RecurrenceSolver(recurr).get(var)
+        n_sym = symbols('n')
 
-    for formula, _ in pieces:
-        extract_algebraic_roots(formula, root_registry)
+        if isinstance(closed_form, Piecewise):
+            pieces = closed_form.args
+        else:
+            pieces = [(closed_form, True)]
 
-    for i, (formula, _) in enumerate(pieces):
-        # i represents the ith closed form for this variable.
-        piece = {
-            "bases" : [],
-            "coeffs" : []
-        }
-        bases_and_coefficients = get_bases_and_coefficients2(formula)
-        #print(bases_and_coefficients)
-        for j, (base, coeff) in enumerate(bases_and_coefficients):
-            if base == "constant":
-                base = "1.0"
-            #print(f"\tBase {j}: {base}, Coeff: {coeff}")
-            base_expr = substitute_registered_roots(sympy.factor(sympy.radsimp(sympify(base))), root_registry)
-            coeff_expr = substitute_registered_roots(sympy.factor(sympy.radsimp(sympify(coeff))), root_registry)
+        rewritten_pieces = []
+        for formula, cond in pieces:
+            extract_complex_pairs(formula, complex_registry)
+            rewritten = rewrite_complex_pairs(formula, complex_registry, n_sym)
+            rewritten = rewrite_negative_real_phases(rewritten, complex_registry, n_sym)
+            extract_algebraic_roots(rewritten, root_registry)
+            rewritten_pieces.append((rewritten, cond))
 
-            smt_base = to_smtlib(sympy_to_pysmt2(base_expr), daggify=False)
-            smt_base = convert_coordinates2(smt_base)
-            #print(smt_base)
-            smt_coeff = to_smtlib(sympy_to_pysmt2(coeff_expr), daggify=False)
-            smt_coeff = convert_coordinates2(smt_coeff)
-            #print(f"c{i}r{j}: {smt_base}\nc{i}a{j}: {smt_coeff}")
-            
-            piece["bases"].append(smt_base)
-            piece["coeffs"].append(smt_coeff)
-            
-            if base != "1.0":
-                roots.add(smt_base)
-        
-        var_dict[var].append(piece)
+        for i, (formula, _) in enumerate(rewritten_pieces):
+            piece = {
+                "bases": [],
+                "coeffs": [],
+            }
+            bases_and_coefficients = get_bases_and_coefficients2(formula)
+            for j, (base, coeff) in enumerate(bases_and_coefficients):
+                if base == "constant":
+                    base = "1.0"
 
-payload = {"aux_roots": root_registry.to_json(), **var_dict}
-json_string = json.dumps(payload)
-with open('data.json', 'w', encoding='utf-8') as f:
-    json.dump(payload, f, ensure_ascii=False, indent=4)
-print(str(json_string).replace("pow", "^"))
-#print(f"There were only {len(roots)} roots in all of the closed forms!")
+                base_expr = substitute_registered_roots(sympy.factor(sympy.radsimp(sympify(base))), root_registry)
+                coeff_expr = substitute_registered_roots(sympy.factor(sympy.radsimp(sympify(coeff))), root_registry)
+                base_expr, coeff_expr = normalize_serialized_base_and_coeff(base_expr, coeff_expr)
+
+                smt_base = to_smtlib(sympy_to_pysmt2(base_expr), daggify=False)
+                smt_base = convert_coordinates2(smt_base)
+                smt_coeff = to_smtlib(sympy_to_pysmt2(coeff_expr), daggify=False)
+                smt_coeff = convert_coordinates2(smt_coeff)
+
+                piece["bases"].append(smt_base)
+                piece["coeffs"].append(smt_coeff)
+
+                if base != "1.0":
+                    roots.add(smt_base)
+
+            var_dict[var].append(piece)
+
+    return {"aux_roots": root_registry.to_json(), "complex_pairs": complex_registry.to_json(), **var_dict}
+
+
+def main(argv=None):
+    argv = sys.argv if argv is None else argv
+    vars = argv[2:] if len(argv) > 2 else []
+    payload = build_payload(argv[1], vars)
+    json_string = json.dumps(payload)
+    with open('data.json', 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False, indent=4)
+    print(str(json_string).replace("pow", "^"))
+
+
+if __name__ == "__main__":
+    main()

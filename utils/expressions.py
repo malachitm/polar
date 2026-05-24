@@ -1,5 +1,6 @@
-from typing import List
+from typing import Dict, List, Tuple
 import math
+import sympy
 
 from symengine.lib.symengine_wrapper import sympy2symengine, Expr, Symbol, One, Zero
 from sympy import (
@@ -231,6 +232,93 @@ def resolve_real_croot(root, eps=1e-10):
     root._set_interval(interval)
 
     return ("real", (poly_expr, Rational(interval.a), Rational(interval.b)))
+
+
+def detect_angle_period(theta, max_den=12, digits=50, tol=1e-40) -> int:
+    """
+    Detect the smallest positive period T such that exp(i * T * theta) = 1.
+
+    The search is bounded to periods up to 2 * max_den, which covers the common
+    rational-angle cases needed by the complex-pair encoding. Returns 0 when no
+    such period is detected within the bound.
+    """
+    theta_val = N(theta, digits)
+    tolerance = sympy.Float(tol, digits)
+
+    for period in range(1, 2 * max_den + 1):
+        cycles = N(theta_val * period / (2 * sympy.pi), digits)
+        nearest_cycle = sympy.Integer(round(float(cycles)))
+        if abs(N(cycles - nearest_cycle, digits)) < tolerance:
+            return period
+
+    return 0
+
+
+def phase_metadata(real_part, imag_part, max_den=12, digits=50, tol=1e-40) -> Dict[str, object]:
+    """
+    Compute cos(theta), sin(theta), and periodicity metadata from Cartesian parts.
+
+    This is the core phase helper for both genuine complex roots and the special
+    negative-real case, where multiplying by a negative number corresponds to a
+    pi phase shift.
+    """
+    real_expr = sympy.sympify(real_part)
+    imag_expr = sympy.sympify(imag_part)
+    magnitude = sympy.sqrt(real_expr**2 + imag_expr**2)
+    if magnitude == 0:
+        raise ValueError("phase is undefined for zero magnitude")
+
+    cos_theta = sympy.simplify(real_expr / magnitude)
+    sin_theta = sympy.simplify(imag_expr / magnitude)
+    theta = sympy.atan2(N(imag_expr, digits), N(real_expr, digits))
+    period = detect_angle_period(theta, max_den=max_den, digits=digits, tol=tol)
+
+    return {
+        "cos_theta": cos_theta,
+        "sin_theta": sin_theta,
+        "is_periodic": period != 0,
+        "period": period,
+    }
+
+
+def mag_poly_from_complex_root(root, eps=1e-10) -> Tuple[Expr, Rational, Rational]:
+    """
+    Given a non-real ComplexRootOf alpha, compute the minimal polynomial and a
+    rational isolating interval for |alpha|.
+    """
+    if not isinstance(root, ComplexRootOf):
+        raise ValueError("expected ComplexRootOf")
+    if root.is_real:
+        raise ValueError("expected a non-real ComplexRootOf")
+
+    mag_sq = sympy.simplify(root * sympy.conjugate(root))
+    mag_expr = sympy.sqrt(sympy.simplify(sympy.re(mag_sq)))
+    mag_var = symbols("_mag_x")
+    poly = Poly(sympy.minpoly(mag_expr, mag_var), mag_var)
+    target = N(mag_expr, 50)
+
+    for interval, _ in poly.intervals(eps=eps):
+        low, high = interval
+        low_q = Rational(low)
+        high_q = Rational(high)
+        if low_q <= target <= high_q:
+            return (poly.as_expr(), low_q, high_q)
+
+    raise ValueError(f"Could not isolate magnitude polynomial for {root}")
+
+
+def complex_root_metadata(root, max_den=12, digits=50, eps=1e-10, tol=1e-40) -> Dict[str, object]:
+    """
+    Build the magnitude/phase metadata needed for future complex-pair JSON output.
+    """
+    poly_expr, low, high = mag_poly_from_complex_root(root, eps=eps)
+    phase = phase_metadata(sympy.re(root), sympy.im(root), max_den=max_den, digits=digits, tol=tol)
+    return {
+        "mag_poly": poly_expr,
+        "mag_low": low,
+        "mag_high": high,
+        **phase,
+    }
 
 
 def poly_to_int_coeffs(poly_expr) -> List[str]:
