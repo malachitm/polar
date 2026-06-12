@@ -10,6 +10,7 @@ from io import StringIO
 from sympy import symbols, Piecewise, sympify, S, Wild, collect, simplify, sqrt, exp, log, sin, cos, Add, Mul
 import re
 import sys
+import time
 from collections import defaultdict
 from sympy.printing import sstr
 from utils import resolve_real_croot, poly_to_int_coeffs, complex_root_metadata, phase_metadata
@@ -17,10 +18,107 @@ from utils import resolve_real_croot, poly_to_int_coeffs, complex_root_metadata,
 from sympy import sqrt as sympy_sqrt
 import pysmt.shortcuts as smt
 import json
+from symengine import sympify as se_sympify
 
 from sympy import Mul, Pow, Symbol, Integer
 
 ALGEBRAIC_INTERVAL_EPS = 1e-10
+
+
+class DebugLogger:
+    def __init__(self, enabled=False):
+        self.enabled = enabled
+        self._totals = defaultdict(float)
+
+    def log(self, message):
+        if not self.enabled:
+            return
+        print(f"[closedforms2 debug] {message}", file=sys.stderr, flush=True)
+
+    def timed(self, label):
+        return _TimedBlock(self, label)
+
+    def add_total(self, label, elapsed):
+        if self.enabled:
+            self._totals[label] += elapsed
+
+    def emit_summary(self):
+        if not self.enabled or not self._totals:
+            return
+        self.log("timing summary:")
+        for label, elapsed in sorted(self._totals.items(), key=lambda item: item[1], reverse=True):
+            self.log(f"  {label}: {elapsed:.6f}s")
+
+
+class _TimedBlock:
+    def __init__(self, logger, label):
+        self._logger = logger
+        self._label = label
+        self.elapsed = 0.0
+        self._start = 0.0
+
+    def __enter__(self):
+        self._start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.elapsed = time.perf_counter() - self._start
+        self._logger.add_total(self._label, self.elapsed)
+        self._logger.log(f"{self._label}: {self.elapsed:.6f}s")
+        return False
+
+
+def parse_main_args(argv):
+    args = list(argv[1:])
+    debug = False
+    filtered_args = []
+    for arg in args:
+        if arg == "--debug":
+            debug = True
+            continue
+        filtered_args.append(arg)
+
+    if not filtered_args:
+        raise SystemExit("usage: closedforms2.py [--debug] <program> [vars ...]")
+
+    return debug, filtered_args[0], filtered_args[1:]
+
+
+def to_symengine_expr(expr):
+    expr = sympy.sympify(expr)
+    try:
+        return se_sympify(expr)
+    except Exception:
+        return expr
+
+
+def sympy_expr_with_locals(expr):
+    sympy_expr = sympy.sympify(expr)
+    locals_map = {sym.name: sym for sym in sympy_expr.free_symbols if getattr(sym, "name", None)}
+    locals_map["I"] = sympy.I
+    return sympy_expr, locals_map
+
+
+def symengine_expand(expr):
+    sympy_expr, locals_map = sympy_expr_with_locals(expr)
+    backend_expr = to_symengine_expr(sympy_expr)
+    if hasattr(backend_expr, "expand"):
+        try:
+            return sympy.sympify(str(backend_expr.expand()), locals=locals_map)
+        except Exception:
+            pass
+    return sympy.expand(sympy_expr)
+
+
+def symengine_simplify(expr):
+    sympy_expr, locals_map = sympy_expr_with_locals(expr)
+    backend_expr = to_symengine_expr(sympy_expr)
+    if hasattr(backend_expr, "simplify"):
+        try:
+            return sympy.sympify(str(backend_expr.simplify()), locals=locals_map)
+        except Exception:
+            pass
+    return sympy.simplify(sympy_expr)
 
 
 class RootRegistry:
@@ -355,27 +453,28 @@ def resolve_real_algebraic_expr(expr, eps=ALGEBRAIC_INTERVAL_EPS):
 
 
 def extract_algebraic_roots(expr, registry):
-    expr = sympy.sympify(expr)
-    if registry.register(expr) is not None:
+    backend_expr = to_symengine_expr(expr)
+    sympy_expr = sympy.sympify(backend_expr)
+    if registry.register(sympy_expr) is not None:
         return
 
-    for arg in expr.args:
+    for arg in backend_expr.args:
         extract_algebraic_roots(arg, registry)
 
 
 def extract_complex_pairs(expr, registry):
-    expr = sympy.sympify(expr)
+    backend_expr = to_symengine_expr(expr)
     # Only register the base when this expression is Pow(base, k*n) — the only
     # form where a genuine eigenvalue base appears in a closed form.  Visiting
     # arbitrary complex sub-expressions (e.g. the imaginary unit I inside an
     # eigenvector coefficient) would otherwise register spurious complex pairs.
-    if isinstance(expr, sympy.Pow):
-        base, exp = expr.as_base_exp()
+    if getattr(backend_expr, "is_Pow", False):
+        base, exp = backend_expr.args
         if linear_n_coeff(exp, "n") is not None:
             registry.register(base)
             return
 
-    for arg in expr.args:
+    for arg in backend_expr.args:
         extract_complex_pairs(arg, registry)
 
 
@@ -406,15 +505,15 @@ def split_complex_root_term(term, registry, symbol_name="n"):
 
     if root is None:
         return None
-    return root, sympy.simplify(coeff)
+    return root, symengine_simplify(coeff)
 
 
 def rewrite_complex_pairs(expr, registry, n_sym):
-    expr = sympy.expand(sympy.sympify(expr))
+    expr = symengine_expand(expr)
     grouped_terms = {}
     unmatched_terms = []
 
-    for term in get_summands(expr):
+    for term in (expr.args if getattr(expr, "is_Add", False) else [expr]):
         split = split_complex_root_term(term, registry, getattr(n_sym, "name", "n"))
         if split is None:
             unmatched_terms.append(term)
@@ -431,9 +530,9 @@ def rewrite_complex_pairs(expr, registry, n_sym):
             {"entry": entry, "alpha_coeff": None, "beta_coeff": None},
         )
         if root == entry["root"]:
-            group["alpha_coeff"] = coeff if group["alpha_coeff"] is None else sympy.simplify(group["alpha_coeff"] + coeff)
+            group["alpha_coeff"] = coeff if group["alpha_coeff"] is None else symengine_simplify(group["alpha_coeff"] + coeff)
         else:
-            group["beta_coeff"] = coeff if group["beta_coeff"] is None else sympy.simplify(group["beta_coeff"] + coeff)
+            group["beta_coeff"] = coeff if group["beta_coeff"] is None else symengine_simplify(group["beta_coeff"] + coeff)
 
     rewritten_terms = list(unmatched_terms)
     for group in grouped_terms.values():
@@ -448,20 +547,20 @@ def rewrite_complex_pairs(expr, registry, n_sym):
                 rewritten_terms.append(beta_coeff * entry["conjugate_root"] ** n_sym)
             continue
 
-        trig_coeff = sympy.simplify(
+        trig_coeff = symengine_simplify(
             (alpha_coeff + beta_coeff) * entry["ccos_symbol"]
             + sympy.I * (alpha_coeff - beta_coeff) * entry["csin_symbol"]
         )
-        rewritten_terms.append(sympy.simplify((entry["mag_symbol"] ** n_sym) * trig_coeff))
+        rewritten_terms.append(symengine_simplify((entry["mag_symbol"] ** n_sym) * trig_coeff))
 
-    return sympy.simplify(sympy.Add(*rewritten_terms))
+    return symengine_simplify(sympy.Add(*rewritten_terms))
 
 
 def rewrite_negative_real_phases(expr, registry, n_sym):
-    expr = sympy.expand(sympy.sympify(expr))
+    expr = symengine_expand(expr)
     rewritten_terms = []
 
-    for term in get_summands(expr):
+    for term in (expr.args if getattr(expr, "is_Add", False) else [expr]):
         normalized = sympy.powsimp(term, combine="base", force=True)
         factors = normalized.args if isinstance(normalized, sympy.Mul) else (normalized,)
 
@@ -485,9 +584,9 @@ def rewrite_negative_real_phases(expr, registry, n_sym):
 
         entry = registry.register_negative_real(negative_pow)
         mag_term = entry["mag_symbol"] ** n_sym
-        rewritten_terms.append(sympy.simplify(remaining * mag_term * entry["ccos_symbol"]))
+        rewritten_terms.append(symengine_simplify(remaining * mag_term * entry["ccos_symbol"]))
 
-    return sympy.simplify(sympy.Add(*rewritten_terms))
+    return symengine_simplify(sympy.Add(*rewritten_terms))
 
 def unroll_powers(expr):
     """
@@ -860,10 +959,15 @@ def convert_coordinates(text):
     
     return new_text
 
-def build_payload(program_path, vars):
-    program = Parser().parse_file(program_path)
-    program = normalize_program(program)
-    rec_builder = RecBuilder(program)
+def build_payload(program_path, vars, debug_logger=None):
+    debug_logger = DebugLogger() if debug_logger is None else debug_logger
+
+    with debug_logger.timed("parse_file"):
+        program = Parser().parse_file(program_path)
+    with debug_logger.timed("normalize_program"):
+        program = normalize_program(program)
+    with debug_logger.timed("build_rec_builder"):
+        rec_builder = RecBuilder(program)
 
     roots: set = set()
     var_dict = {}
@@ -871,61 +975,81 @@ def build_payload(program_path, vars):
     complex_registry = ComplexPairRegistry()
 
     for var in vars:
+        debug_logger.log(f"starting variable {var}")
         var_dict[var] = []
-        recurr = rec_builder.get_recurrences(var)
-        closed_form = RecurrenceSolver(recurr).get(var)
+        with debug_logger.timed(f"var {var}: get_recurrences"):
+            recurr = rec_builder.get_recurrences(var)
+        debug_logger.log(
+            f"variable {var}: recurrence system size={len(recurr.monomials)}, inhomogeneous={recurr.is_inhomogeneous}, acyclic={recurr.is_acyclic}"
+        )
+        with debug_logger.timed(f"var {var}: solve_closed_form"):
+            solver = RecurrenceSolver(recurr)
+            closed_form = solver.get(var)
+        debug_logger.log(f"variable {var}: solver exact={solver.is_exact}")
         n_sym = symbols('n')
 
         if isinstance(closed_form, Piecewise):
             pieces = closed_form.args
         else:
             pieces = [(closed_form, True)]
+        debug_logger.log(f"variable {var}: piece count={len(pieces)}")
 
         rewritten_pieces = []
-        for formula, cond in pieces:
-            extract_complex_pairs(formula, complex_registry)
-            rewritten = rewrite_complex_pairs(formula, complex_registry, n_sym)
-            rewritten = rewrite_negative_real_phases(rewritten, complex_registry, n_sym)
-            extract_algebraic_roots(rewritten, root_registry)
-            rewritten_pieces.append((rewritten, cond))
+        with debug_logger.timed(f"var {var}: rewrite_pieces"):
+            for formula, cond in pieces:
+                extract_complex_pairs(formula, complex_registry)
+                rewritten = rewrite_complex_pairs(formula, complex_registry, n_sym)
+                rewritten = rewrite_negative_real_phases(rewritten, complex_registry, n_sym)
+                extract_algebraic_roots(rewritten, root_registry)
+                rewritten_pieces.append((rewritten, cond))
 
-        for i, (formula, _) in enumerate(rewritten_pieces):
-            piece = {
-                "bases": [],
-                "coeffs": [],
-            }
-            bases_and_coefficients = get_bases_and_coefficients2(formula)
-            for j, (base, coeff) in enumerate(bases_and_coefficients):
-                if base == "constant":
-                    base = "1.0"
+        base_count = 0
+        with debug_logger.timed(f"var {var}: serialize_pieces"):
+            for i, (formula, _) in enumerate(rewritten_pieces):
+                piece = {
+                    "bases": [],
+                    "coeffs": [],
+                }
+                bases_and_coefficients = list(get_bases_and_coefficients2(formula))
+                base_count += len(bases_and_coefficients)
+                for j, (base, coeff) in enumerate(bases_and_coefficients):
+                    if base == "constant":
+                        base = "1.0"
 
-                base_expr = substitute_registered_roots(sympy.factor(sympy.radsimp(sympify(base))), root_registry)
-                coeff_expr = substitute_registered_roots(sympy.factor(sympy.radsimp(sympify(coeff))), root_registry)
-                base_expr, coeff_expr = normalize_serialized_base_and_coeff(base_expr, coeff_expr)
+                    base_expr = substitute_registered_roots(sympy.factor(sympy.radsimp(sympify(base))), root_registry)
+                    coeff_expr = substitute_registered_roots(sympy.factor(sympy.radsimp(sympify(coeff))), root_registry)
+                    base_expr, coeff_expr = normalize_serialized_base_and_coeff(base_expr, coeff_expr)
 
-                smt_base = to_smtlib(sympy_to_pysmt2(base_expr), daggify=False)
-                smt_base = convert_coordinates2(smt_base)
-                smt_coeff = to_smtlib(sympy_to_pysmt2(coeff_expr), daggify=False)
-                smt_coeff = convert_coordinates2(smt_coeff)
+                    smt_base = to_smtlib(sympy_to_pysmt2(base_expr), daggify=False)
+                    smt_base = convert_coordinates2(smt_base)
+                    smt_coeff = to_smtlib(sympy_to_pysmt2(coeff_expr), daggify=False)
+                    smt_coeff = convert_coordinates2(smt_coeff)
 
-                piece["bases"].append(smt_base)
-                piece["coeffs"].append(smt_coeff)
+                    piece["bases"].append(smt_base)
+                    piece["coeffs"].append(smt_coeff)
 
-                if base != "1.0":
-                    roots.add(smt_base)
+                    if base != "1.0":
+                        roots.add(smt_base)
 
-            var_dict[var].append(piece)
+                var_dict[var].append(piece)
+
+        debug_logger.log(
+            f"variable {var}: emitted {len(var_dict[var])} serialized pieces, {base_count} base/coeff pairs, total aux_roots={len(root_registry._ordered)}, complex_pairs={len(complex_registry._ordered)}"
+        )
 
     return {"aux_roots": root_registry.to_json(), "complex_pairs": complex_registry.to_json(), **var_dict}
 
 
 def main(argv=None):
     argv = sys.argv if argv is None else argv
-    vars = argv[2:] if len(argv) > 2 else []
-    payload = build_payload(argv[1], vars)
+    debug_enabled, program_path, vars = parse_main_args(argv)
+    debug_logger = DebugLogger(debug_enabled)
+    with debug_logger.timed("total"):
+        payload = build_payload(program_path, vars, debug_logger=debug_logger)
     json_string = json.dumps(payload)
     with open('data.json', 'w', encoding='utf-8') as f:
         json.dump(payload, f, ensure_ascii=False, indent=4)
+    debug_logger.emit_summary()
     print(str(json_string).replace("pow", "^"))
 
 
